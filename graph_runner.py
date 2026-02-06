@@ -56,7 +56,7 @@ class AgentRunner:
         
         # Check for termination keywords at any stage (except initial and critical confirmation stages)
         user_lower = user_input.lower()
-        termination_keywords = ["no thanks", "thanks", "thank you", "no thank you", "that's all", "thats all"]
+        termination_keywords = ["no thanks", "thanks", "thank you", "no thank you", "that's all", "thats all", "exit", "0"]
         
         # Check if user wants to terminate (but not during fraud confirmation where "no" has specific meaning)
         if current_stage not in ["initial", "fraud_confirmation", "fraud_action"]:
@@ -115,8 +115,8 @@ Please provide your registered mobile number:"""
             from knowledge_base import CUSTOMER_DB
             
             customer_found = None
-            for customer in CUSTOMER_DB:
-                if customer["mobile_number"] == mobile_number:
+            for customer in CUSTOMER_DB.values():
+                if customer["mobile"] == mobile_number:
                     customer_found = customer
                     break
             
@@ -135,7 +135,13 @@ Now, please provide the last 4 digits of your card:"""
             else:
                 self.verification_attempts += 1
                 if self.verification_attempts >= self.max_verification_attempts:
-                    response = "Mobile number verification failed. Please contact customer support or try again later."
+                    response = """Mobile number verification failed. Please contact customer support or try again later.
+
+Please select an option:
+1. General Enquiry (Reward points, Statement, Credit limit, etc.)
+2. Fraud Transaction (Report suspicious transaction)
+
+Type **1** or **2** to continue."""
                     self.current_stage = "initial"
                     self.verification_attempts = 0
                     trace["action"] = "mobile_verification_failed_max_attempts"
@@ -175,7 +181,6 @@ How can I assist you today? You can ask about:
 - Credit limit
 - Recent transactions
 - Statement details
-- Any other credit card related query
 
 Please type your question."""
                     trace["action"] = "verification_success"
@@ -205,7 +210,13 @@ Please provide the transaction number (1-{len(transactions[:5])}) or describe th
             else:
                 self.verification_attempts += 1
                 if self.verification_attempts >= self.max_verification_attempts:
-                    response = "Card verification failed. Please contact customer support or try again later."
+                    response = """Card verification failed. Please contact customer support or try again later.
+
+Please select an option:
+1. General Enquiry (Reward points, Statement, Credit limit, etc.)
+2. Fraud Transaction (Report suspicious transaction)
+
+Type **1** or **2** to continue."""
                     self.current_stage = "initial"
                     self.verification_attempts = 0
                     self.agent.mobile_number = None
@@ -222,14 +233,81 @@ Attempts remaining: {self.max_verification_attempts - self.verification_attempts
         
         # Stage: General Enquiry
         elif current_stage == "general_enquiry":
-            # Use the agent to handle general queries
+            # Check if user wants to start a new query with option 1 or 2
+            if user_input in ["1", "2"]:
+                # Reset and start new conversation
+                self.current_stage = "initial"
+                self.selected_option = None
+                self.pending_transaction = None
+                self.general_query = None
+                if hasattr(self, 'fraud_check_done'):
+                    delattr(self, 'fraud_check_done')
+                # Don't reset customer verification
+                
+                return self.process_input(user_input, "initial")
+            
+            # PROACTIVE FRAUD DETECTION - Check for suspicious transactions first
+            from knowledge_base.transactions import get_suspicious_transactions
+            
+            suspicious_txns = get_suspicious_transactions(self.agent.customer_id)
+            
+            if suspicious_txns and not hasattr(self, 'fraud_check_done'):
+                # Found suspicious transaction - proactively alert customer
+                self.fraud_check_done = True
+                high_risk_txn = suspicious_txns[0]
+                self.pending_transaction = high_risk_txn
+                self.general_query = user_input  # Store original query
+                self.current_stage = "fraud_confirmation"
+                
+                # Calm, specific alert
+                location_info = ""
+                if "international" in high_risk_txn.get('location', '').lower():
+                    location_info = f" at an overseas merchant ({high_risk_txn.get('location', '')})"
+                
+                time_info = ""
+                if high_risk_txn.get('transaction_time'):
+                    time_info = f" during {high_risk_txn['transaction_time']}"
+                
+                response = f"""Before I help you with that, I'd like to quickly confirm a recent transaction for your safety.
+
+**Transaction Alert:**
+- Amount: ₹{high_risk_txn['amount']:.2f}
+- Merchant: {high_risk_txn['merchant']}
+- Date: {high_risk_txn['date']}{time_info}
+- Location: {high_risk_txn.get('location', 'N/A')}
+- Status: {high_risk_txn['status'].upper()}
+
+Was this transaction authorized by you?
+- Type **YES** if you authorized it
+- Type **NO** if you did not authorize it"""
+                trace["action"] = "proactive_fraud_alert"
+                trace["transaction_amount"] = high_risk_txn['amount']
+                return response, trace
+            
+            # No suspicious transactions or already checked - process general query
             self.general_query = user_input
             
             # Simple keyword-based responses (can be enhanced with LLM)
             user_lower = user_input.lower()
             
             if "reward" in user_lower or "point" in user_lower:
-                response = f"""Your current reward points balance is: **5,240 points**
+                # Get actual customer data
+                customer = get_customer(self.agent.mobile_number, self.agent.last_4)
+                if customer and "reward_points" in customer:
+                    rewards = customer["reward_points"]
+                    response = f"""Your current reward points balance is: **{rewards['total_points']:,} points**
+
+**Reward Details:**
+- Cashback Value: ₹{rewards['cashback_value']:.2f}
+- Points Expiring Soon: {rewards['points_expiring_soon']} (by {rewards['expiry_date']})
+
+**Redemption Options:**
+{chr(10).join(['- ' + opt for opt in rewards['redemption_options']])}
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                else:
+                    response = f"""Your current reward points balance is: **5,240 points**
 
 You can redeem these points for:
 - Shopping vouchers
@@ -237,7 +315,8 @@ You can redeem these points for:
 - Cashback
 - Gift cards
 
-Would you like to know more about redemption options?"""
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
                 trace["action"] = "reward_points_query"
             
             elif "credit limit" in user_lower or "limit" in user_lower:
@@ -248,20 +327,61 @@ Would you like to know more about redemption options?"""
 
 Your credit utilization is at 26.5%, which is healthy!
 
-Would you like to request a credit limit increase?"""
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
                 trace["action"] = "credit_limit_query"
             
-            elif "transaction" in user_lower or "statement" in user_lower:
+            elif "statement" in user_lower or "bill" in user_lower:
                 transactions = get_transactions(self.agent.customer_id)
                 trans_list = "\n".join([
                     f"- {t['date']} - ${t['amount']:.2f} at {t['merchant']} ({t['status']})"
                     for t in transactions[:10]
                 ])
+                response = f"""**Statement Summary:**
+- Statement Date: February 5, 2026
+- Statement Period: January 6, 2026 - February 5, 2026
+- Total Amount Due: $2,650.00
+- Minimum Amount Due: $132.50
+- Payment Due Date: March 15, 2026
+- Last Payment: $1,500.00 on January 10, 2026
+
+**Recent Transactions:**
+{trans_list}
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                trace["action"] = "statement_query"
+            
+            elif "due" in user_lower or "payment" in user_lower:
+                response = f"""**Payment Information:**
+- Payment Due Date: March 15, 2026
+- Total Amount Due: $2,650.00
+- Minimum Amount Due: $132.50
+- Last Payment: $1,500.00 on January 10, 2026
+
+**Payment Options:**
+- Online banking
+- Mobile app
+- Auto-debit
+- Bank branch
+- Cheque deposit
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                trace["action"] = "payment_due_query"
+            
+            elif "transaction" in user_lower or "history" in user_lower:
+                transactions = get_transactions(self.agent.customer_id)
+                trans_list = "\n".join([
+                    f"- {t['date']} - ${t['amount']:.2f} at {t['merchant']}"
+                    for t in transactions[:5]
+                ])
                 response = f"""Here are your recent transactions:
 
 {trans_list}
 
-Would you like a detailed statement sent to your email?"""
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
                 trace["action"] = "transaction_query"
             
             else:
@@ -272,10 +392,12 @@ I'm here to help! Could you please be more specific? You can ask about:
 - Credit limit
 - Recent transactions
 - Statement details
-- Card benefits
 - Payment due dates
 
-Or feel free to rephrase your question."""
+Or feel free to rephrase your question.
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
                 trace["action"] = "general_query_clarification"
             
             return response, trace
@@ -355,7 +477,7 @@ Did you authorize this transaction?
                 response = f"""I understand this is concerning. For your security, I will:
 
 1. **Block your card** immediately to prevent further unauthorized transactions
-2. **Raise a dispute** for the transaction of ${trans['amount']:.2f}
+2. **Raise a dispute** for the transaction of ₹{trans['amount']:.2f}
 
 A new card will be issued and sent to your registered address within 5-7 business days.
 
@@ -367,15 +489,64 @@ Should I proceed with these actions?
                 return response, trace
             
             elif "yes" in user_lower:
-                # Authorized transaction - no action needed
-                self.current_stage = "completed"
-                response = f"""Thank you for confirming. Since you authorized this transaction, no action is needed.
+                # Authorized transaction - return to general enquiry if that's where we came from
+                if hasattr(self, 'general_query') and self.general_query:
+                    # Process the original general query now
+                    original_query = self.general_query
+                    self.general_query = None
+                    self.pending_transaction = None
+                    self.current_stage = "general_enquiry"
+                    
+                    response = f"""Thank you for confirming. Your transaction is legitimate.
+
+Now, regarding your query about "{original_query}"...
+
+"""
+                    # Add the answer to the original query
+                    query_lower = original_query.lower()
+                    
+                    if "reward" in query_lower or "point" in query_lower:
+                        customer = get_customer(self.agent.mobile_number, self.agent.last_4)
+                        if customer and "reward_points" in customer:
+                            rewards = customer["reward_points"]
+                            response += f"""Your current reward points balance is: **{rewards['total_points']:,} points**
+
+**Reward Details:**
+- Cashback Value: ₹{rewards['cashback_value']:.2f}
+- Points Expiring Soon: {rewards['points_expiring_soon']} (by {rewards['expiry_date']})
+
+**Redemption Options:**
+{chr(10).join(['- ' + opt for opt in rewards['redemption_options']])}
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                        else:
+                            response += f"""Your current reward points balance is: **5,240 points**
+
+You can redeem these points for:
+- Shopping vouchers
+- Flight miles
+- Cashback
+- Gift cards
+
+Is there anything else I can help you with?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                    else:
+                        response += """How else can I assist you today?
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
+                    
+                    trace["action"] = "transaction_authorized_return_to_query"
+                    return response, trace
+                else:
+                    # Direct fraud flow - no action needed
+                    self.current_stage = "completed"
+                    response = f"""Thank you for confirming. Since you authorized this transaction, no action is needed.
 
 If you have any other concerns, please let me know!
 
 Type **1** or **2** to start a new query."""
-                trace["action"] = "transaction_authorized"
-                return response, trace
+                    trace["action"] = "transaction_authorized"
+                    return response, trace
             else:
                 response = "Please respond with **YES** or **NO**."
                 trace["action"] = "invalid_confirmation"
@@ -393,7 +564,7 @@ Type **1** or **2** to start a new query."""
                 block_ticket = f"BLK{hash(self.agent.customer_id) % 1000000:06d}"
                 
                 # Simulate raising dispute
-                dispute_ticket = f"DSP{hash(trans.get('transaction_id', 'unknown')) % 1000000:06d}"
+                dispute_ticket = f"CCB{hash(trans.get('transaction_id', 'unknown')) % 1000000:06d}"
                 
                 self.current_stage = "completed"
                 response = f"""✓ Actions completed successfully!
@@ -413,7 +584,7 @@ Type **1** or **2** to start a new query."""
 - You'll receive SMS updates on both tickets
 
 Is there anything else I can help you with?
-Type **1** or **2** to start a new query."""
+Type **1** or **2** to start a new query, or **thanks/0/exit** to go to main menu."""
                 trace["action"] = "fraud_actions_completed"
                 trace["block_ticket"] = block_ticket
                 trace["dispute_ticket"] = dispute_ticket

@@ -89,7 +89,7 @@ DISPUTE_PROCESS = {
         }
     },
     "ticket_format": {
-        "prefix": "FRD" if "fraud" else "DSP",
+        "prefix": "FRD" if "fraud" else "CCB",
         "length": 6,
         "example": "FRD123456"
     },
@@ -136,7 +136,7 @@ SMS_FORMATS = {
     },
     "dispute_raised": {
         "template": "Dispute ticket {ticket_id} raised for Rs.{amount} transaction. Resolution in {sla} days. Track at {url}",
-        "example": "Dispute ticket DSP789012 raised for Rs.8900 transaction. Resolution in 5-7 days. Track at www.bank.com/disputes"
+        "example": "Dispute ticket CCB789012 raised for Rs.8900 transaction. Resolution in 5-7 days. Track at www.bank.com/disputes"
     }
 }
 

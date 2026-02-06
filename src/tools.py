@@ -69,7 +69,7 @@ def raise_dispute_ticket(customer_id: str, transaction_details: dict) -> dict:
     Returns:
         dict with ticket information
     """
-    ticket_number = f"DSP{random.randint(100000, 999999)}"
+    ticket_number = f"CCB{random.randint(100000, 999999)}"
     return {
         "success": True,
         "ticket_number": ticket_number,
